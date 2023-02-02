@@ -10,16 +10,6 @@ import (
 
 // Statsd host:port pair
 var Endpoint = "localhost:8125"
-// Metric prefix path
-var Prefix = "pillar"
-// Collection pause interval, in seconds
-var Pause = 1
-// Collect CPU Statistics
-var Cpu = true
-// Collect Memory Statistics
-var Mem = true
-// Collect GC Statistics (requires Memory be enabled)
-var Gc = true
 
 // collector
 var c *collector = nil
@@ -179,26 +169,26 @@ func (c *collector) outputGCStats(m *runtime.MemStats) {
 }
 
 
-func Initialize() error {
-	statter, err := g2s.Dial("udp", Endpoint)
+func Initialize(endpoint string, prefix string, pauseDuration int, cpu bool, mem bool, gc bool) error {
+	statter, err := g2s.Dial("udp", endpoint)
 	if err != nil {
 		return err
 	}
 
-	if Prefix == "" {
-		Prefix = "go"
+	if prefix == "" {
+		prefix = "go"
 	}
-	Prefix += "."
+	prefix += "."
 
 	gaugeFunc := func(key string, val uint64) {
-		statter.Gauge(1.0, Prefix+key, strconv.FormatUint(val, 10))
+		statter.Gauge(1.0, prefix+key, strconv.FormatUint(val, 10))
 	}
 
 	c = newCollector(gaugeFunc)
-	c.pauseDur = time.Duration(Pause) * time.Second
-	c.enableCPU = Cpu
-	c.enableMem = Mem
-	c.enableGC = Gc
+	c.pauseDur = time.Duration(pauseDuration) * time.Second
+	c.enableCPU = cpu
+	c.enableMem = mem
+	c.enableGC = gc
 
 	return nil
 }
