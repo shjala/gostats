@@ -71,9 +71,9 @@ func (c *collector) run() {
 	defer tick.Stop()
 	for {
 		select {
-		case <- c.done:
+		case <-c.done:
 			return
-		case <- tick.C:
+		case <-tick.C:
 			c.outputStats()
 		}
 	}
@@ -148,7 +148,6 @@ func (c *collector) outputMemStats(m *runtime.MemStats) {
 	c.gaugeFunc("mem.heap.HeapReleased", m.HeapReleased)
 	c.gaugeFunc("mem.heap.HeapObjects", m.HeapObjects)
 
-
 	// Stack
 	c.gaugeFunc("mem.stack.StackSys", m.StackSys)
 	c.gaugeFunc("mem.stack.StackInuse", m.StackInuse)
@@ -167,7 +166,6 @@ func (c *collector) outputGCStats(m *runtime.MemStats) {
 	c.gaugeFunc("mem.gc.Pause", m.PauseNs[(m.NumGC+255)%256])
 	c.gaugeFunc("mem.gc.NumGC", uint64(m.NumGC))
 }
-
 
 func Initialize(endpoint string, prefix string, pauseDuration int, cpu bool, mem bool, gc bool) error {
 	statter, err := g2s.Dial("udp", endpoint)
