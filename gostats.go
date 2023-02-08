@@ -1,11 +1,10 @@
 package gostats
 
 import (
+	"fmt"
+	"net"
 	"runtime"
-	"strconv"
 	"time"
-
-	"github.com/peterbourgon/g2s"
 )
 
 // Statsd host:port pair
@@ -14,20 +13,14 @@ var Endpoint = "localhost:8125"
 // collector
 var c *collector = nil
 
-// GaugeFunc is an interface that implements the setting of a gauge value
-// in a stats system. It should be expected that key will contain multiple
-// parts separated by the '.' character in the form used by statsd (e.x.
-// "mem.heap.alloc")
-type GaugeFunc func(key string, val uint64)
-
 // Collector implements the periodic grabbing of informational data from the
-// runtime package and outputting the values to a GaugeFunc.
+// runtime package and outputting it to statsd.
 type collector struct {
-	// PauseDur represents the interval inbetween each set of stats output.
-	// Defaults to 10 seconds.
+	// PauseDur represents the interval between each set of stats output.
+	// Defaults to 5 seconds.
 	pauseDur time.Duration
 
-	// EnableCPU determines whether CPU statisics will be output. Defaults to true.
+	// EnableCPU determines whether CPU statistics will be output. Defaults to true.
 	enableCPU bool
 
 	// EnableMem determines whether memory statistics will be output. Defaults to true.
@@ -37,32 +30,28 @@ type collector struct {
 	// must also be set to true for this to take affect. Defaults to true.
 	enableGC bool
 
-	// Done, when closed, is used to signal Collector that is should stop collecting
-	// statistics and the Run function should return. If Done is set, upon shutdown
-	// all gauges will be sent a final zero value to reset their values to 0.
-	done <-chan struct{}
+	// Bucket prefix
+	prefix string
 
-	gaugeFunc GaugeFunc
+	// Connection handler
+	conn net.Conn
 }
 
-// New creates a new Collector that will periodically output statistics to gaugeFunc. It
-// will also set the values of the exported fields to the described defaults. The values
-// of the exported defaults can be changed at any point before Run is called.
-func newCollector(gaugeFunc GaugeFunc) *collector {
+// New creates a new Collector that will periodically output statistics to send.
+func newCollector(prefix string, conn net.Conn) *collector {
 	return &collector{
-		pauseDur:  1 * time.Second,
+		pauseDur:  5 * time.Second,
 		enableCPU: true,
 		enableMem: true,
 		enableGC:  true,
-		gaugeFunc: gaugeFunc,
+		prefix:    prefix,
+		conn:      conn,
 	}
 }
 
-// Run gathers statistics from package runtime and outputs them to the configured GaugeFunc every
-// PauseDur. This function will not return until Done has been closed (or never if Done is nil),
-// therefore it should be called in its own goroutine.
+// Run gathers statistics from package runtime and outputs them statsd,
+// this will never return.
 func (c *collector) run() {
-	defer c.zeroStats()
 	c.outputStats()
 
 	// Gauges are a 'snapshot' rather than a histogram. Pausing for some interval
@@ -71,8 +60,6 @@ func (c *collector) run() {
 	defer tick.Stop()
 	for {
 		select {
-		case <-c.done:
-			return
 		case <-tick.C:
 			c.outputStats()
 		}
@@ -82,22 +69,6 @@ func (c *collector) run() {
 type cpuStats struct {
 	NumGoroutine uint64
 	NumCgoCall   uint64
-}
-
-// zeroStats sets all the stat guages to zero. On shutdown we want to zero them out so they don't persist
-// at their last value until we start back up.
-func (c *collector) zeroStats() {
-	if c.enableCPU {
-		cStats := cpuStats{}
-		c.outputCPUStats(&cStats)
-	}
-	if c.enableMem {
-		mStats := runtime.MemStats{}
-		c.outputMemStats(&mStats)
-		if c.enableGC {
-			c.outputGCStats(&mStats)
-		}
-	}
 }
 
 func (c *collector) outputStats() {
@@ -119,78 +90,76 @@ func (c *collector) outputStats() {
 }
 
 func (c *collector) outputCPUStats(s *cpuStats) {
-	c.gaugeFunc("cpu.NumGoroutine", s.NumGoroutine)
-	c.gaugeFunc("cpu.NumCgoCall", s.NumCgoCall)
+	c.send("cpu.NumGoroutine", s.NumGoroutine)
+	c.send("cpu.NumCgoCall", s.NumCgoCall)
 }
 
 func (c *collector) outputMemStats(m *runtime.MemStats) {
 	// sys
-	c.gaugeFunc("mem.sys.Sys", m.Sys)
-	c.gaugeFunc("mem.sys.Lookups", m.Lookups)
-	c.gaugeFunc("mem.sys.OtherSys", m.OtherSys)
+	c.send("mem.sys.Sys", m.Sys)
+	c.send("mem.sys.Lookups", m.Lookups)
+	c.send("mem.sys.OtherSys", m.OtherSys)
 
 	// common
-	c.gaugeFunc("mem.com.Total_VM_Bytes_Reserved", m.Sys)
-	c.gaugeFunc("mem.com.Live_Heap_Bytes_Allocated", m.Alloc)
-	c.gaugeFunc("mem.com.Cumulative_Heap_Bytes_Allocated", m.TotalAlloc)
-	c.gaugeFunc("mem.com.Total_Stack_Allocation", m.StackSys)
-	c.gaugeFunc("mem.com.Other_Bytes_Allocation", m.OtherSys)
+	c.send("mem.com.Total_VM_Bytes_Reserved", m.Sys)
+	c.send("mem.com.Live_Heap_Bytes_Allocated", m.Alloc)
+	c.send("mem.com.Cumulative_Heap_Bytes_Allocated", m.TotalAlloc)
+	c.send("mem.com.Total_Stack_Allocation", m.StackSys)
+	c.send("mem.com.Other_Bytes_Allocation", m.OtherSys)
 
 	// Heap
-	c.gaugeFunc("mem.heap.Alloc", m.Alloc)
-	c.gaugeFunc("mem.heap.TotalAlloc", m.TotalAlloc)
-	c.gaugeFunc("mem.heap.Mallocs", m.Mallocs)
-	c.gaugeFunc("mem.heap.Frees", m.Frees)
-	c.gaugeFunc("mem.heap.HeapAlloc", m.HeapAlloc)
-	c.gaugeFunc("mem.heap.HeapSys", m.HeapSys)
-	c.gaugeFunc("mem.heap.HeapIdle", m.HeapIdle)
-	c.gaugeFunc("mem.heap.HeapInuse", m.HeapInuse)
-	c.gaugeFunc("mem.heap.HeapReleased", m.HeapReleased)
-	c.gaugeFunc("mem.heap.HeapObjects", m.HeapObjects)
+	c.send("mem.heap.Alloc", m.Alloc)
+	c.send("mem.heap.TotalAlloc", m.TotalAlloc)
+	c.send("mem.heap.Mallocs", m.Mallocs)
+	c.send("mem.heap.Frees", m.Frees)
+	c.send("mem.heap.HeapAlloc", m.HeapAlloc)
+	c.send("mem.heap.HeapSys", m.HeapSys)
+	c.send("mem.heap.HeapIdle", m.HeapIdle)
+	c.send("mem.heap.HeapInuse", m.HeapInuse)
+	c.send("mem.heap.HeapReleased", m.HeapReleased)
+	c.send("mem.heap.HeapObjects", m.HeapObjects)
 
 	// Stack
-	c.gaugeFunc("mem.stack.StackSys", m.StackSys)
-	c.gaugeFunc("mem.stack.StackInuse", m.StackInuse)
-	c.gaugeFunc("mem.stack.MSpanInuse", m.MSpanInuse)
-	c.gaugeFunc("mem.stack.MSpanSys", m.MSpanSys)
-	c.gaugeFunc("mem.stack.MCacheInuse", m.MCacheInuse)
-	c.gaugeFunc("mem.stack.MCacheSys", m.MCacheSys)
+	c.send("mem.stack.StackSys", m.StackSys)
+	c.send("mem.stack.StackInuse", m.StackInuse)
+	c.send("mem.stack.MSpanInuse", m.MSpanInuse)
+	c.send("mem.stack.MSpanSys", m.MSpanSys)
+	c.send("mem.stack.MCacheInuse", m.MCacheInuse)
+	c.send("mem.stack.MCacheSys", m.MCacheSys)
 
 }
 
 func (c *collector) outputGCStats(m *runtime.MemStats) {
-	c.gaugeFunc("mem.gc.GCSys", m.GCSys)
-	c.gaugeFunc("mem.gc.NextGC", m.NextGC)
-	c.gaugeFunc("mem.gc.LastGC", m.LastGC)
-	c.gaugeFunc("mem.gc.PauseTotalNs", m.PauseTotalNs)
-	c.gaugeFunc("mem.gc.Pause", m.PauseNs[(m.NumGC+255)%256])
-	c.gaugeFunc("mem.gc.NumGC", uint64(m.NumGC))
+	c.send("mem.gc.GCSys", m.GCSys)
+	c.send("mem.gc.NextGC", m.NextGC)
+	c.send("mem.gc.LastGC", m.LastGC)
+	c.send("mem.gc.PauseTotalNs", m.PauseTotalNs)
+	c.send("mem.gc.Pause", m.PauseNs[(m.NumGC+255)%256])
+	c.send("mem.gc.NumGC", uint64(m.NumGC))
 }
 
-func Initialize(endpoint string, prefix string, pauseDuration int, cpu bool, mem bool, gc bool) error {
-	statter, err := g2s.Dial("udp", endpoint)
+func (c *collector) send(bucket string, value uint64) {
+	buf := []byte(fmt.Sprintf("%v.%v:%v|g", c.prefix, bucket, value))
+	n, err := c.conn.Write(buf)
+	if err != nil {
+		fmt.Printf("error sending data:  %s", err)
+	} else if n != len(buf) {
+		fmt.Printf("error short send: %d < %d", n, len(buf))
+	}
+}
+
+func Collect(endpoint string, prefix string, pauseDuration int, cpu bool, mem bool, gc bool) error {
+	conn, err := net.DialTimeout("udp", endpoint, 2*time.Second)
 	if err != nil {
 		return err
 	}
 
-	if prefix == "" {
-		prefix = "go"
-	}
-	prefix += "."
-
-	gaugeFunc := func(key string, val uint64) {
-		statter.Gauge(1.0, prefix+key, strconv.FormatUint(val, 10))
-	}
-
-	c = newCollector(gaugeFunc)
+	c = newCollector(prefix, conn)
 	c.pauseDur = time.Duration(pauseDuration) * time.Second
 	c.enableCPU = cpu
 	c.enableMem = mem
 	c.enableGC = gc
 
+	go c.run()
 	return nil
-}
-
-func Collect() {
-	c.run()
 }
